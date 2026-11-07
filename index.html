@@ -149,7 +149,7 @@ textarea:focus,input[type=text]:focus{outline:none; border-color:var(--saffron);
     </div>
     <div class="min-w-0">
       <h2 class="font-bold text-lg" style="font-family:'Hind Siliguri'">ঢাক বাজান, দ্রুত শেয়ার করুন! 🎶</h2>
-      <p class="text-sm" style="color:var(--muted)">দুই ডিভাইসে একই রুম কোড দিন। টেক্সট বা ছবি পাঠালে ঢাক বাজবে, আর ফোন কেঁপে উঠবে। ঢাকে ট্যাপ করেও দেখুন!</p>
+      <p class="text-sm" style="color:var(--muted)">অন্য ডিভাইসে Room Link খুলুন। দুজন Connected হলেই Text বা Picture পাঠাতে পারবেন। শেষ মেসেজের ১০ মিনিট পর রুমের ডেটা মুছে যাবে।</p>
     </div>
   </section>
 
@@ -161,6 +161,7 @@ textarea:focus,input[type=text]:focus{outline:none; border-color:var(--saffron);
         <span id="roomCodeDisplay">-----</span>
       </button>
       <button class="btn btn-primary" onclick="createNewRoom()">＋ Create</button>
+      <button class="btn btn-ghost" onclick="copyRoomLink()">🔗 Share Link</button>
       <button class="btn btn-ghost" onclick="openJoinModal()">➜ Join</button>
     </div>
     <span id="connectionStatus" class="inline-flex items-center px-3.5 py-1.5 rounded-full text-xs font-bold" style="background:rgba(255,200,61,.25);color:#a35a00">
@@ -183,9 +184,6 @@ textarea:focus,input[type=text]:focus{outline:none; border-color:var(--saffron);
         <button class="btn btn-primary" onclick="sendTextData()">🚀 Send Text</button>
         <button class="btn btn-ghost" onclick="copyText()">📋 Copy</button>
         <button class="btn btn-ghost" onclick="pasteText()">📥 Paste</button>
-        <label class="flex items-center gap-2 text-xs font-semibold cursor-pointer select-none px-2">
-          <input type="checkbox" id="liveSync" class="w-4 h-4 accent-orange-500"> ⚡ Live sync
-        </label>
       </div>
       <span id="lastSynced" class="text-xs italic" style="color:var(--muted)">Ready to send</span>
     </div>
@@ -226,8 +224,9 @@ textarea:focus,input[type=text]:focus{outline:none; border-color:var(--saffron);
 <div id="joinModal" class="fixed inset-0 z-[90] hidden items-center justify-center" style="background:rgba(60,10,20,.55);backdrop-filter:blur(6px)">
   <div class="card p-6 max-w-sm w-[92%] flex flex-col gap-4 enter">
     <h3 class="text-lg font-extrabold">🔑 Join Existing Room</h3>
-    <p class="text-xs" style="color:var(--muted)">অপর ডিভাইসের ৫ ডিজিটের রুম কোড দিন:</p>
-    <input type="text" id="joinRoomInput" inputmode="numeric" maxlength="5" placeholder="58291" class="w-full px-4 py-3 font-mono tracking-[.4em] text-center text-2xl">
+    <p class="text-xs" style="color:var(--muted)">রুম কোড ও Share Link-এর access key দিন:</p>
+    <input type="text" id="joinRoomInput" inputmode="numeric" maxlength="5" placeholder="৫ ডিজিটের Room Code" class="w-full px-4 py-3 font-mono tracking-[.4em] text-center text-2xl">
+    <input type="text" id="joinTokenInput" placeholder="Access key" class="w-full px-4 py-3 font-mono text-xs">
     <div class="flex gap-3">
       <button class="btn btn-ghost flex-1 justify-center" onclick="closeJoinModal()">Cancel</button>
       <button class="btn btn-primary flex-1 justify-center" onclick="submitJoinRoom()">Join</button>
@@ -235,6 +234,7 @@ textarea:focus,input[type=text]:focus{outline:none; border-color:var(--saffron);
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/dist/umd/supabase.min.js"></script>
 <script>
 /* ===== Helpers: ripple on every button + haptics ===== */
 function haptic(p){ try{ if(navigator.vibrate) navigator.vibrate(p) }catch(e){} }
@@ -315,153 +315,154 @@ for(let i=0;i<6;i++){
   document.body.appendChild(d);
 }
 
-/* ===== Room + presence ===== */
-function newCode(){ return Math.floor(10000+Math.random()*90000).toString(); }
-function getRoomCode(){
-  const h = location.hash.substring(1);
-  if(/^\d{5}$/.test(h)) return h;
-  const c = newCode(); location.hash = c; return c;
+/* ===== Supabase-backed Rooms + Realtime ===== */
+const SUPABASE_URL = 'https://qjjswjxxfmmcqkjqkgxg.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_EOQzE55TlcimYYLzO_8v5w_RxExl81Y';
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+function uuid(){ return crypto.randomUUID(); }
+const clientId = uuid();
+let currentRoom = '', accessToken = '', roomChannel = null, isConnected = false;
+let selectedBase64Image = null, heartbeatTimer = null, lastReceivedMessageId = '';
+const hashParts = location.hash.substring(1).split('.');
+if(/^\d{5}$/.test(hashParts[0]||'') && /^[a-f0-9]{48}$/i.test(hashParts[1]||'')){
+  currentRoom=hashParts[0]; accessToken=hashParts[1];
 }
-let currentRoom = getRoomCode();
-const clientId = 'user_' + Math.random().toString(36).substring(2,9);
-let presenceKey, storageKeyText, storageKeyImage, isConnected=false, selectedBase64Image=null;
-let lastReceivedTextTime=0, lastReceivedImageTime=0;
-
-function setKeys(){
-  document.getElementById('roomCodeDisplay').innerText = currentRoom;
-  presenceKey='quickshare_presence_'+currentRoom; storageKeyText='quickshare_text_'+currentRoom; storageKeyImage='quickshare_img_'+currentRoom;
-}
-setKeys();
-
+function setRoomDisplay(){ document.getElementById('roomCodeDisplay').innerText=currentRoom||'-----'; }
+setRoomDisplay();
 function setConnectionState(connected, text){
   const dot=document.getElementById('statusDot'), badge=document.getElementById('connectionStatus'), ws=document.getElementById('workspaceContainer');
   document.getElementById('statusText').innerText=text;
-  if(connected){
-    dot.style.background=dot.style.color='#1faa59'; badge.style.background='rgba(31,170,89,.18)'; badge.style.color='#0f7a3c';
-    ws.classList.remove('locked');
-  } else {
-    dot.style.background=dot.style.color='#ff8a00'; badge.style.background='rgba(255,200,61,.25)'; badge.style.color='#a35a00';
-    ws.classList.add('locked');
-  }
+  if(connected){ dot.style.background=dot.style.color='#1faa59'; badge.style.background='rgba(31,170,89,.18)'; badge.style.color='#0f7a3c'; ws.classList.remove('locked'); }
+  else { dot.style.background=dot.style.color='#ff8a00'; badge.style.background='rgba(255,200,61,.25)'; badge.style.color='#a35a00'; ws.classList.add('locked'); }
 }
-function updatePresence(){
-  let users={}; try{users=JSON.parse(localStorage.getItem(presenceKey)||'{}')}catch(e){}
-  const now=Date.now();
-  Object.keys(users).forEach(id=>{ if(now-users[id]>6000) delete users[id]; });
-  users[clientId]=now;
-  try{localStorage.setItem(presenceKey, JSON.stringify(users))}catch(e){}
-  const n=Object.keys(users).length;
-  if(n>=2){
-    if(!isConnected){ isConnected=true; setConnectionState(true,`Connected (${n} Active Users)`); dhakBeat(null,true); setTimeout(()=>dhakBeat(null,true),380); petals(26); showToast('🎉 কানেক্টেড! ঢাক বাজাও!'); haptic([60,40,60]); }
-  } else if(isConnected){ isConnected=false; setConnectionState(false,'Waiting for 2nd person...'); }
+setConnectionState(false,'Waiting for 2nd person...');
+async function rpc(name,args){
+  const {data,error}=await supabaseClient.rpc(name,args);
+  if(error) throw error;
+  return data;
 }
-setInterval(updatePresence,1500); updatePresence();
-window.addEventListener('beforeunload',()=>{ try{ const u=JSON.parse(localStorage.getItem(presenceKey)||'{}'); delete u[clientId]; localStorage.setItem(presenceKey,JSON.stringify(u)); }catch(e){} });
-
-function switchRoom(code){
-  currentRoom=code; location.hash=code; setKeys(); isConnected=false; setConnectionState(false,'Waiting for 2nd person...');
-  lastReceivedTextTime=0; lastReceivedImageTime=0; updatePresence();
+async function joinCurrentRoom(){
+  if(!currentRoom || !accessToken) return;
+  try{
+    const count=await rpc('quickshare_join_room',{p_room_code:currentRoom,p_client_id:clientId,p_access_token:accessToken});
+    const connected=count>=2;
+    if(connected && !isConnected){ dhakBeat(null,true); setTimeout(()=>dhakBeat(null,true),380); petals(18); showToast('🎉 Connected!'); }
+    isConnected=connected;
+    setConnectionState(connected,connected?`Connected (${count} Active Users)`:'Waiting for 2nd person...');
+  }catch(e){ isConnected=false; setConnectionState(false,'Room expired / Invalid link'); showToast(e.message||'Room-এ যোগ দেওয়া যায়নি'); clearInterval(heartbeatTimer); }
 }
-function createNewRoom(){ switchRoom(newCode()); showToast('নতুন রুম: '+currentRoom); dhakBeat(null); }
-function copyRoom(){ navigator.clipboard && navigator.clipboard.writeText(currentRoom).then(()=>showToast('Room code কপি হয়েছে')).catch(()=>{}); }
-window.addEventListener('hashchange',()=>{ const h=location.hash.substring(1); if(/^\d{5}$/.test(h) && h!==currentRoom) switchRoom(h); });
+async function attachRealtime(){
+  if(roomChannel) await supabaseClient.removeChannel(roomChannel);
+  if(!currentRoom) return;
+  roomChannel=supabaseClient.channel('quickshare-room-'+currentRoom);
+  roomChannel.on('broadcast',{event:'new_message'},async(payload)=>{
+    const id=payload?.payload?.message_id;
+    if(!id || id===lastReceivedMessageId) return;
+    try{
+      const rows=await rpc('quickshare_get_messages',{p_room_code:currentRoom,p_client_id:clientId,p_access_token:accessToken});
+      const m=rows.find(x=>x.id===id);
+      if(!m || m.sender_id===clientId) return;
+      lastReceivedMessageId=id;
+      if(m.kind==='text'){
+        textBox.value=m.content; updateStats(); textBox.classList.remove('flash'); void textBox.offsetWidth; textBox.classList.add('flash');
+        dhakBeat(null); showToast('📩 নতুন টেক্সট এসেছে!'); haptic([30,30,30]);
+      }else{
+        showImage(m.content,'Received Picture (Ready to Download)'); dhakBeat(null,true); petals(10); showToast('🖼️ নতুন ছবি এসেছে!'); haptic([30,30,30]);
+      }
+    }catch(e){ showToast(e.message||'Message load failed'); }
+  }).subscribe();
+}
+async function switchRoom(code,token){
+  currentRoom=code; accessToken=token; location.hash=code+'.'+token; setRoomDisplay();
+  isConnected=false; setConnectionState(false,'Connecting...');
+  clearInterval(heartbeatTimer); await attachRealtime(); await joinCurrentRoom();
+  heartbeatTimer=setInterval(joinCurrentRoom,5000);
+}
+async function createNewRoom(){
+  try{
+    const room=await rpc('quickshare_create_room',{});
+    await switchRoom(room.room_code,room.access_token);
+    showToast('নতুন রুম তৈরি হয়েছে: '+currentRoom); dhakBeat(null);
+  }catch(e){showToast(e.message||'Room তৈরি করা যায়নি');}
+}
+async function copyRoom(){
+  if(!currentRoom) return showToast('আগে Room তৈরি করুন');
+  try{await navigator.clipboard.writeText(currentRoom);showToast('Room code কপি হয়েছে');}catch(e){showToast('Copy failed');}
+}
+async function copyRoomLink(){
+  if(!currentRoom||!accessToken) return showToast('আগে Room তৈরি করুন');
+  const link=location.href.split('#')[0]+'#'+currentRoom+'.'+accessToken;
+  try{await navigator.clipboard.writeText(link);showToast('🔗 Room Link কপি হয়েছে—অন্যজনকে পাঠান');}catch(e){showToast('Link copy failed');}
+}
+window.addEventListener('hashchange',()=>{
+  const p=location.hash.substring(1).split('.');
+  if(/^\d{5}$/.test(p[0]||'') && /^[a-f0-9]{48}$/i.test(p[1]||'') && (p[0]!==currentRoom||p[1]!==accessToken)) switchRoom(p[0],p[1]);
+});
 
 /* ===== Text ===== */
 const textBox=document.getElementById('textContent');
-function updateStats(){ document.getElementById('charCount').innerText = textBox.value.length+' characters'; }
-function sendTextData(silent){
+function updateStats(){ document.getElementById('charCount').innerText=textBox.value.length+' characters'; }
+async function sendTextData(silent){
+  if(!isConnected) return showToast('দুইজন connect হওয়ার পর পাঠান');
+  if(!textBox.value.trim()) return showToast('আগে Text লিখুন');
   try{
-    localStorage.setItem(storageKeyText, JSON.stringify({sender:clientId, content:textBox.value, time:Date.now()}));
-  }catch(e){ showToast('পাঠানো যায়নি'); return; }
-  document.getElementById('lastSynced').innerText='Sent '+new Date().toLocaleTimeString();
-  if(!silent){ dhakBeat(null,true); showToast('✅ টেক্সট পাঠানো হয়েছে!'); petals(8); }
+    await rpc('quickshare_send_message',{p_room_code:currentRoom,p_client_id:clientId,p_kind:'text',p_content:textBox.value,p_access_token:accessToken});
+    document.getElementById('lastSynced').innerText='Sent '+new Date().toLocaleTimeString();
+    if(!silent){dhakBeat(null,true);showToast('✅ টেক্সট পাঠানো হয়েছে!');petals(8);}
+  }catch(e){showToast(e.message||'পাঠানো যায়নি');}
 }
-let liveTimer;
-textBox.addEventListener('input',()=>{
-  updateStats();
-  if(document.getElementById('liveSync').checked){ clearTimeout(liveTimer); liveTimer=setTimeout(()=>sendTextData(true),250); }
-});
+textBox.addEventListener('input',()=>{updateStats();});
 function copyText(){
   if(!textBox.value) return showToast('কপি করার মতো টেক্সট নেই!');
-  (navigator.clipboard ? navigator.clipboard.writeText(textBox.value) : Promise.reject()).then(()=>showToast('📋 কপি হয়েছে!')).catch(()=>{
-    textBox.select(); try{document.execCommand('copy'); showToast('📋 কপি হয়েছে!')}catch(e){showToast('কপি ব্যর্থ')}
-  });
+  (navigator.clipboard?navigator.clipboard.writeText(textBox.value):Promise.reject()).then(()=>showToast('📋 কপি হয়েছে!')).catch(()=>{textBox.select();try{document.execCommand('copy');showToast('📋 কপি হয়েছে!')}catch(e){showToast('কপি ব্যর্থ')}});
 }
-async function pasteText(){
-  try{ const t=await navigator.clipboard.readText(); textBox.value=t; updateStats(); showToast('📥 পেস্ট হয়েছে'); }
-  catch(e){ showToast('ব্রাউজার পেস্ট অনুমতি দেয়নি'); }
-}
+async function pasteText(){try{const t=await navigator.clipboard.readText();textBox.value=t;updateStats();showToast('📥 পেস্ট হয়েছে');}catch(e){showToast('ব্রাউজার পেস্ট অনুমতি দেয়নি');}}
 
-/* ===== Image (compressed to fit storage) ===== */
+/* ===== Image ===== */
 function loadImageFile(file){
-  if(!file || !file.type.startsWith('image/')) return showToast('শুধু ছবি দিন!');
-  const reader=new FileReader();
-  reader.onload=e=>{
-    const img=new Image();
-    img.onload=()=>{
-      const max=1400, sc=Math.min(1, max/Math.max(img.width,img.height));
-      const c=document.createElement('canvas'); c.width=img.width*sc; c.height=img.height*sc;
+  if(!file||!file.type.startsWith('image/')) return showToast('শুধু ছবি দিন!');
+  const reader=new FileReader(); reader.onload=e=>{
+    const img=new Image(); img.onload=()=>{
+      const max=1200,sc=Math.min(1,max/Math.max(img.width,img.height));
+      const c=document.createElement('canvas');c.width=Math.round(img.width*sc);c.height=Math.round(img.height*sc);
       c.getContext('2d').drawImage(img,0,0,c.width,c.height);
-      selectedBase64Image=c.toDataURL('image/jpeg',.82);
+      selectedBase64Image=c.toDataURL('image/jpeg',.72);
+      if(selectedBase64Image.length>1800000){showToast('ছবিটি ছোট করে আবার চেষ্টা করুন');return;}
       showImage(selectedBase64Image,'Picture loaded for sending');
-    };
-    img.src=e.target.result;
-  };
-  reader.readAsDataURL(file);
+    };img.src=e.target.result;
+  };reader.readAsDataURL(file);
 }
 function showImage(src,status){
-  const box=document.getElementById('imagePreviewContainer');
-  document.getElementById('previewImg').src=src; document.getElementById('downloadBtn').href=src;
-  box.classList.remove('hidden'); box.classList.add('flex','enter'); document.getElementById('imageStatus').innerText=status;
+  const box=document.getElementById('imagePreviewContainer');document.getElementById('previewImg').src=src;document.getElementById('downloadBtn').href=src;
+  box.classList.remove('hidden');box.classList.add('flex','enter');document.getElementById('imageStatus').innerText=status;
 }
-function sendImageData(){
+async function sendImageData(){
+  if(!isConnected) return showToast('দুইজন connect হওয়ার পর পাঠান');
   if(!selectedBase64Image) return showToast('আগে একটা ছবি সিলেক্ট করুন!');
-  try{ localStorage.setItem(storageKeyImage, JSON.stringify({sender:clientId, content:selectedBase64Image, time:Date.now()})); }
-  catch(e){ return showToast('ছবিটা অনেক বড়, ছোট ছবি দিন'); }
-  dhakBeat(null,true); setTimeout(()=>dhakBeat(null,true),300); petals(14); showToast('✅ ছবি পাঠানো হয়েছে!');
+  try{await rpc('quickshare_send_message',{p_room_code:currentRoom,p_client_id:clientId,p_kind:'image',p_content:selectedBase64Image,p_access_token:accessToken});dhakBeat(null,true);setTimeout(()=>dhakBeat(null,true),300);petals(14);showToast('✅ ছবি পাঠানো হয়েছে!');}
+  catch(e){showToast(e.message||'ছবি পাঠানো যায়নি');}
 }
-function clearImage(){
-  selectedBase64Image=null; document.getElementById('previewImg').src='';
-  const box=document.getElementById('imagePreviewContainer'); box.classList.add('hidden'); box.classList.remove('flex');
-  document.getElementById('imageStatus').innerText='No image'; document.getElementById('imageInput').value=''; showToast('Cleared');
-}
+function clearImage(){selectedBase64Image=null;document.getElementById('previewImg').src='';const box=document.getElementById('imagePreviewContainer');box.classList.add('hidden');box.classList.remove('flex');document.getElementById('imageStatus').innerText='No image';document.getElementById('imageInput').value='';showToast('Cleared');}
 document.getElementById('imageInput').addEventListener('change',e=>loadImageFile(e.target.files[0]));
 const dz=document.getElementById('dropzone');
-['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault(); dz.classList.add('drag')}));
-['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault(); dz.classList.remove('drag')}));
+['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag')}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag')}));
 dz.addEventListener('drop',e=>loadImageFile(e.dataTransfer.files[0]));
-document.addEventListener('paste',e=>{ const it=[...(e.clipboardData?.items||[])].find(i=>i.type.startsWith('image/')); if(it) loadImageFile(it.getAsFile()); });
-
-/* ===== Receive (instant via storage event + poll fallback) ===== */
-function receive(){
-  try{
-    const t=JSON.parse(localStorage.getItem(storageKeyText)||'null');
-    if(t && t.sender!==clientId && t.time>lastReceivedTextTime){
-      lastReceivedTextTime=t.time; textBox.value=t.content; updateStats();
-      textBox.classList.remove('flash'); void textBox.offsetWidth; textBox.classList.add('flash');
-      dhakBeat(null); showToast('📩 নতুন টেক্সট এসেছে!'); haptic([30,30,30]);
-    }
-    const im=JSON.parse(localStorage.getItem(storageKeyImage)||'null');
-    if(im && im.sender!==clientId && im.time>lastReceivedImageTime){
-      lastReceivedImageTime=im.time; showImage(im.content,'Received Picture (Ready to Download)');
-      dhakBeat(null,true); petals(10); showToast('🖼️ নতুন ছবি এসেছে!'); haptic([30,30,30]);
-    }
-  }catch(e){}
-}
-window.addEventListener('storage',receive);
-setInterval(receive,1000);
+document.addEventListener('paste',e=>{const it=[...(e.clipboardData?.items||[])].find(i=>i.type.startsWith('image/'));if(it)loadImageFile(it.getAsFile());});
 
 /* ===== Join modal ===== */
-const jm=document.getElementById('joinModal'), ji=document.getElementById('joinRoomInput');
-function openJoinModal(){ ji.value=''; jm.classList.remove('hidden'); jm.classList.add('flex'); setTimeout(()=>ji.focus(),100); }
-function closeJoinModal(){ jm.classList.add('hidden'); jm.classList.remove('flex'); }
-function submitJoinRoom(){
-  const v=ji.value.trim();
-  if(/^\d{5}$/.test(v)){ closeJoinModal(); switchRoom(v); showToast('রুমে জয়েন হয়েছে: '+v); dhakBeat(null,true); }
-  else { showToast('সঠিক ৫ ডিজিটের নম্বর দিন!'); haptic([40,40,40]); }
+const jm=document.getElementById('joinModal'),ji=document.getElementById('joinRoomInput'),jt=document.getElementById('joinTokenInput');
+function openJoinModal(){ji.value='';jt.value='';jm.classList.remove('hidden');jm.classList.add('flex');setTimeout(()=>ji.focus(),100);}
+function closeJoinModal(){jm.classList.add('hidden');jm.classList.remove('flex');}
+async function submitJoinRoom(){
+  const v=ji.value.trim(),t=jt.value.trim();
+  if(/^\d{5}$/.test(v)&&/^[a-f0-9]{48}$/i.test(t)){closeJoinModal();await switchRoom(v,t);showToast('রুমে যোগ দেওয়া হয়েছে: '+v);dhakBeat(null,true);}
+  else{showToast('Room code ও সঠিক access key দিন!');haptic([40,40,40]);}
 }
-ji.addEventListener('keydown',e=>{ if(e.key==='Enter') submitJoinRoom(); if(e.key==='Escape') closeJoinModal(); });
-jm.addEventListener('pointerdown',e=>{ if(e.target===jm) closeJoinModal(); });
+ji.addEventListener('keydown',e=>{if(e.key==='Enter')jt.focus();if(e.key==='Escape')closeJoinModal();});
+jt.addEventListener('keydown',e=>{if(e.key==='Enter')submitJoinRoom();if(e.key==='Escape')closeJoinModal();});
+jm.addEventListener('pointerdown',e=>{if(e.target===jm)closeJoinModal();});
+if(currentRoom&&accessToken){attachRealtime().then(joinCurrentRoom);heartbeatTimer=setInterval(joinCurrentRoom,5000);}
 
 /* ===== Toast (swipe down to dismiss) ===== */
 const toast=document.getElementById('toast'); let toastT, sy=null;
